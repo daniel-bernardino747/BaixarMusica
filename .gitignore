@@ -1,0 +1,8 @@
+build/
+dist/
+*.spec
+__pycache__/
+.pytest_cache/
+
+# Gerado pelo build.ps1 a partir do parametro -Versao.
+version.txt

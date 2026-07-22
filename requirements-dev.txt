@@ -1,0 +1,6 @@
+# So para desenvolver e buildar. O executavel distribuido nao usa nada disto:
+# o app precisa apenas de `mutagen` (congelado dentro) e da stdlib.
+mutagen
+pyinstaller
+pytest
+pillow      # gera o icone.ico, ver README
