@@ -46,6 +46,37 @@ def build_output_template(destino, link):
     return str(Path(destino) / subfolder_for(link) / "{artists} - {title}.{output-ext}")
 
 
+# Hosts do YouTube (cobre www./m./music.youtube.com e o encurtado youtu.be).
+YT_HOSTS = ("youtube.com", "youtu.be")
+# O id de 11 caracteres de um video, em qualquer forma de link do YouTube.
+YT_VIDEO_ID = re.compile(r"(?:youtu\.be/|/shorts/|/embed/|[?&]v=)([\w-]{11})",
+                         re.IGNORECASE)
+
+
+def source_for(link):
+    """Prepara o link para o spotdl baixar o audio do video que voce mandou.
+
+    Num link cru de video do YouTube (youtu.be, youtube.com/watch), o spotdl trata
+    a URL inteira como texto de busca e baixa o primeiro resultado do Spotify -- por
+    isso vinha outra musica. Reescrevendo para music.youtube.com/watch?v=<id> o
+    spotdl fixa o audio no video real; --ytm-data faz nome e artista virem do proprio
+    video. Links do Spotify (que ja acertam), a sintaxe pipe url|url, playlists e
+    buscas por texto passam intactos.
+    Ver docs/pesquisa-links-youtube-baixam-musica-errada.md.
+
+    Retorna (link_para_baixar, flags_extra).
+    """
+    baixo = link.lower()
+    if "open.spotify.com" in baixo:
+        return link, []  # Spotify acerta sozinho (metadados reais); e cobre o pipe.
+    if not any(host in baixo for host in YT_HOSTS):
+        return link, []  # busca por texto, soundcloud, bandcamp: nao e do YouTube.
+    match = YT_VIDEO_ID.search(link)
+    if not match:
+        return link, []  # colecao do YouTube (playlist/album/artista): sem id de video.
+    return f"https://music.youtube.com/watch?v={match.group(1)}", ["--ytm-data"]
+
+
 def _mb(caminho):
     try:
         return f"{os.path.getsize(caminho) / (1024 * 1024):.1f} MB"
@@ -253,12 +284,16 @@ class App(tk.Tk):
         threading.Thread(target=self._worker, args=(destino, link), daemon=True).start()
 
     def _worker(self, destino, link):
+        # Link de video do YouTube vira music.youtube.com para o spotdl pegar o audio
+        # certo em vez de tratar a URL como busca; o resto passa igual.
+        fonte, flags_fonte = source_for(link)
         # --ffmpeg explicito: sem ele o spotdl prefere qualquer ffmpeg do PATH,
         # e o programa passaria a usar um binario diferente em cada maquina.
         comando = [
-            str(self.spotdl), "download", link,
+            str(self.spotdl), "download", fonte,
             "--format", "mp3",
             "--bitrate", "320k",
+            *flags_fonte,
             "--output", build_output_template(destino, link),
             "--ffmpeg", str(self.ffmpeg),
             "--simple-tui",
