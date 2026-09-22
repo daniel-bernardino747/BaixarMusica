@@ -1,6 +1,6 @@
 # BaixarMusica
 
-Uma GUI mínima sobre o spotdl: uma pasta, um link, um botão. O programa administra
+Uma GUI mínima sobre o spotdl e o yt-dlp: uma pasta, um link, um botão. O programa administra
 os próprios binários, para que quem o recebe não precise instalar nada antes.
 
 ## Language
@@ -43,7 +43,7 @@ _Avoid_: scan, análise
 
 **Componente**:
 Um binário de terceiro que o programa precisa para funcionar mas não carrega dentro de
-si — hoje, o spotdl e o ffmpeg. Vive fora do executável, num diretório do usuário, e é
+si — hoje, o spotdl, o yt-dlp, o ffmpeg e o deno (este, opcional). Vive fora do executável, num diretório do usuário, e é
 obtido e mantido atualizado pelo próprio programa.
 _Avoid_: dependência, plugin
 

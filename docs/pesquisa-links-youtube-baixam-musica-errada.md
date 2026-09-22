@@ -1,5 +1,9 @@
 # Por que links do YouTube / YouTube Music baixam a música errada
 
+> **Atualização (v1.2.0):** links do YouTube não passam mais pelo spotdl. O yt-dlp
+> baixa o próprio vídeo — ver [docs/adr/0003](adr/0003-ytdlp-oficial-baixa-o-audio.md).
+> A análise abaixo continua valendo para o comportamento do spotdl em si.
+
 > **Onde este arquivo está:** coloquei esta nota em `docs/` porque o repositório
 > não tem uma pasta dedicada a pesquisa/notas (só existe `docs/adr/` para ADRs).
 > Não é um ADR — é uma investigação de bug — então ficou solto em `docs/`.

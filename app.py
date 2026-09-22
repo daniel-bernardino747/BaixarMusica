@@ -1,24 +1,27 @@
-"""BaixarMusica - GUI minima sobre o spotdl.
+"""BaixarMusica - GUI minima sobre o spotdl e o yt-dlp.
 
 Escolha uma pasta, cole um link, clique em Baixar. O download roda como
 subprocesso e o log aparece ao vivo na janela.
 
-O spotdl e o ffmpeg nao vem instalados na maquina de quem recebe o programa:
-sao componentes que o modulo `preparo` baixa e mantem em %APPDATA%. O preparo
+Os binarios nao vem instalados na maquina de quem recebe o programa: sao
+componentes que o modulo `preparo` baixa e mantem em %APPDATA%. O preparo
 comeca sozinho ao abrir, enquanto a pessoa ainda escolhe a pasta e cola o link.
+O que cada binario faz num download esta em `faixas`.
 """
 
 import json
 import os
 import queue
-import re
 import subprocess
+import tempfile
 import threading
 import tkinter as tk
+import urllib.request
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import duplicados
+import faixas
 import preparo
 
 APP_NAME = "BaixarMusica"
@@ -28,53 +31,16 @@ CONFIG_PATH = preparo.PASTA / "config.json"
 # Esconde o console preto que cada subprocesso abriria no modo --windowed.
 NO_WINDOW = preparo.NO_WINDOW
 
-# Link de colecao vira subpasta; faixa avulsa, busca por texto e YouTube caem na raiz.
-COLLECTION_TEMPLATES = {
-    "playlist": "{list-name}",
-    "album": "{album}",
-    "artist": "{artist}",
-}
-
-
-def subfolder_for(link):
-    """Retorna o template de subpasta do link, ou '' se ele nao for uma colecao."""
-    match = re.search(r"[:/](playlist|album|artist)[:/]", link, re.IGNORECASE)
-    return COLLECTION_TEMPLATES[match.group(1).lower()] if match else ""
-
-
-def build_output_template(destino, link):
-    return str(Path(destino) / subfolder_for(link) / "{artists} - {title}.{output-ext}")
-
-
-# Hosts do YouTube (cobre www./m./music.youtube.com e o encurtado youtu.be).
-YT_HOSTS = ("youtube.com", "youtu.be")
-# O id de 11 caracteres de um video, em qualquer forma de link do YouTube.
-YT_VIDEO_ID = re.compile(r"(?:youtu\.be/|/shorts/|/embed/|[?&]v=)([\w-]{11})",
-                         re.IGNORECASE)
-
-
-def source_for(link):
-    """Prepara o link para o spotdl baixar o audio do video que voce mandou.
-
-    Num link cru de video do YouTube (youtu.be, youtube.com/watch), o spotdl trata
-    a URL inteira como texto de busca e baixa o primeiro resultado do Spotify -- por
-    isso vinha outra musica. Reescrevendo para music.youtube.com/watch?v=<id> o
-    spotdl fixa o audio no video real; --ytm-data faz nome e artista virem do proprio
-    video. Links do Spotify (que ja acertam), a sintaxe pipe url|url, playlists e
-    buscas por texto passam intactos.
-    Ver docs/pesquisa-links-youtube-baixam-musica-errada.md.
-
-    Retorna (link_para_baixar, flags_extra).
-    """
-    baixo = link.lower()
-    if "open.spotify.com" in baixo:
-        return link, []  # Spotify acerta sozinho (metadados reais); e cobre o pipe.
-    if not any(host in baixo for host in YT_HOSTS):
-        return link, []  # busca por texto, soundcloud, bandcamp: nao e do YouTube.
-    match = YT_VIDEO_ID.search(link)
-    if not match:
-        return link, []  # colecao do YouTube (playlist/album/artista): sem id de video.
-    return f"https://music.youtube.com/watch?v={match.group(1)}", ["--ytm-data"]
+def _baixar_capa(url):
+    """Bytes da capa, ou None. Sem capa a musica continua tocando."""
+    if not url:
+        return None
+    try:
+        pedido = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
+        with urllib.request.urlopen(pedido, timeout=30) as resposta:
+            return resposta.read()
+    except OSError:
+        return None
 
 
 def _mb(caminho):
@@ -115,8 +81,7 @@ class App(tk.Tk):
         self.pronto = False        # componentes utilizaveis
         self.falhou_preparo = False  # falhou, mas tentar de novo pode resolver
         self.incompativel = False    # falhou, e tentar de novo nunca resolve
-        self.spotdl = None
-        self.ffmpeg = None
+        self.componentes = None
 
         self._build_ui()
         self.after(100, self._drenar_log)
@@ -229,7 +194,7 @@ class App(tk.Tk):
             else:
                 self.botao_baixar.configure(text="Tentar de novo", state="normal")
             return
-        self.spotdl, self.ffmpeg = caminhos
+        self.componentes = caminhos
         self.pronto = True
         self.botao_baixar.configure(text="Baixar", state="normal")
 
@@ -284,21 +249,76 @@ class App(tk.Tk):
         threading.Thread(target=self._worker, args=(destino, link), daemon=True).start()
 
     def _worker(self, destino, link):
-        # Link de video do YouTube vira music.youtube.com para o spotdl pegar o audio
-        # certo em vez de tratar a URL como busca; o resto passa igual.
-        fonte, flags_fonte = source_for(link)
-        # --ffmpeg explicito: sem ele o spotdl prefere qualquer ffmpeg do PATH,
-        # e o programa passaria a usar um binario diferente em cada maquina.
-        comando = [
-            str(self.spotdl), "download", fonte,
-            "--format", "mp3",
-            "--bitrate", "320k",
-            *flags_fonte,
-            "--output", build_output_template(destino, link),
-            "--ffmpeg", str(self.ffmpeg),
-            "--simple-tui",
-        ]
+        try:
+            if faixas.e_do_youtube(link):
+                codigo = self._baixar_do_youtube(destino, link)
+            else:
+                codigo = self._baixar_pelo_spotdl(destino, link)
+        except Exception as erro:  # nada aqui pode deixar o botao preso em Cancelar
+            self.linhas.put(f"ERRO: {erro}")
+            codigo = None
+        self.after(0, self._finalizar, codigo)
 
+    def _base_ytdlp(self):
+        c = self.componentes
+        return faixas.comando_base(c.ytdlp, c.ffmpeg, c.deno)
+
+    def _baixar_do_youtube(self, destino, link):
+        url, e_colecao = faixas.fonte_youtube(link)
+        return self._rodar(faixas.comando_youtube(self._base_ytdlp(), url, destino, e_colecao))
+
+    def _baixar_pelo_spotdl(self, destino, link):
+        """O spotdl monta a lista; o yt-dlp baixa cada faixa; nos gravamos as tags."""
+        preparo.PASTA.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=preparo.PASTA) as temporaria:
+            arquivo_lista = Path(temporaria) / "lista.spotdl"
+            self.linhas.put("Procurando as musicas...")
+            codigo = self._rodar(faixas.comando_lista(self.componentes.spotdl, link,
+                                                       arquivo_lista))
+            if self.cancelado:
+                return codigo
+            if codigo != 0 or not arquivo_lista.exists():
+                return codigo if codigo else 1
+            musicas = faixas.ler_lista(arquivo_lista)
+
+        falhas = 0
+        for posicao, musica in enumerate(musicas, 1):
+            if self.cancelado:
+                return None
+            falhas += not self._baixar_faixa(destino, link, musica, posicao, len(musicas))
+        if falhas:
+            self.linhas.put(f"{falhas} de {len(musicas)} faixa(s) nao baixaram.")
+        return 1 if falhas else 0
+
+    def _baixar_faixa(self, destino, link, musica, posicao, total):
+        """Baixa e etiqueta uma faixa da lista. Retorna False se ela falhou."""
+        arquivo = faixas.caminho_da_faixa(destino, link, musica)
+        prefixo = f"[{posicao}/{total}] {arquivo.stem}"
+        if arquivo.exists():
+            self.linhas.put(f"{prefixo}: ja existe, pulei.")
+            return True
+        if not musica.get("download_url"):
+            self.linhas.put(f"{prefixo}: nao achei o audio no YouTube.")
+            return False
+
+        self.linhas.put(f"{prefixo}: baixando...")
+        arquivo.parent.mkdir(parents=True, exist_ok=True)
+        codigo = self._rodar(faixas.comando_audio(self._base_ytdlp(),
+                                                  musica["download_url"], arquivo))
+        if codigo != 0 or not arquivo.exists():
+            if not self.cancelado:
+                self.linhas.put(f"{prefixo}: falhou.")
+            return False
+        try:
+            faixas.etiquetar(arquivo, musica, _baixar_capa(musica.get("cover_url")))
+        except Exception as erro:  # o audio esta la; tag faltando nao e motivo de apagar
+            self.linhas.put(f"{prefixo}: baixei, mas nao consegui gravar as tags ({erro}).")
+        return True
+
+    def _rodar(self, comando):
+        """Roda um subprocesso mandando a saida para o log. Retorna o codigo de saida."""
+        if self.cancelado:
+            return None
         ambiente = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
         try:
             self.processo = subprocess.Popen(
@@ -313,15 +333,13 @@ class App(tk.Tk):
                 creationflags=NO_WINDOW,
             )
         except OSError as erro:
-            self.linhas.put(f"ERRO ao iniciar o spotdl: {erro}")
-            self.after(0, self._finalizar, None)
-            return
+            self.linhas.put(f"ERRO ao iniciar {Path(comando[0]).name}: {erro}")
+            return None
 
         for linha in self.processo.stdout:
             if linha.strip():
                 self.linhas.put(linha)
-        codigo = self.processo.wait()
-        self.after(0, self._finalizar, codigo)
+        return self.processo.wait()
 
     def _cancelar(self):
         self.cancelado = True
@@ -330,7 +348,7 @@ class App(tk.Tk):
             # Clique no vao entre marcar ocupado e o Popen retornar; nada a matar.
             return
         if os.name == "nt":
-            # /T derruba a arvore inteira: o spotdl deixa ffmpeg rodando atras dele.
+            # /T derruba a arvore inteira: o yt-dlp deixa ffmpeg rodando atras dele.
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(self.processo.pid)],
                 capture_output=True,

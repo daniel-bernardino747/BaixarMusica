@@ -1,9 +1,10 @@
 # BaixarMusica
 
-GUI mínima sobre o [spotdl](https://github.com/spotDL/spotify-downloader): escolha uma
-pasta, cole um link, clique em **Baixar**.
+GUI mínima sobre o [spotdl](https://github.com/spotDL/spotify-downloader) e o
+[yt-dlp](https://github.com/yt-dlp/yt-dlp): escolha uma pasta, cole um link, clique em
+**Baixar**.
 
-Não precisa instalar Python, nem spotdl, nem ffmpeg. Um arquivo, duplo-clique.
+Não precisa instalar Python, nem spotdl, nem yt-dlp, nem ffmpeg. Um arquivo, duplo-clique.
 
 ## Instalar
 
@@ -32,7 +33,7 @@ quiser conferir que o arquivo é o mesmo que saiu daqui.
 ### Primeira abertura
 
 O programa abre imediatamente, mas o botão mostra **Preparando...** por alguns minutos
-enquanto ele busca os componentes que faltam (**~72 MB**, uma vez só). O log mostra o
+enquanto ele busca os componentes que faltam (**~130 MB**, uma vez só). O log mostra o
 progresso. Escolha a pasta e cole o link enquanto isso — o botão libera sozinho.
 
 Se a conexão cair no meio, ele tenta de novo sozinho três vezes antes de desistir. Se
@@ -43,7 +44,7 @@ Da segunda vez em diante a abertura é instantânea.
 
 ## Usar
 
-O campo **Link** aceita qualquer coisa que o spotdl entenda:
+O campo **Link** aceita qualquer coisa que o spotdl entenda, e qualquer link do YouTube:
 
 | Entrada | Resultado |
 |---|---|
@@ -52,17 +53,23 @@ O campo **Link** aceita qualquer coisa que o spotdl entenda:
 | `https://open.spotify.com/artist/...` | subpasta com o nome do artista |
 | `https://open.spotify.com/track/...` | arquivo solto na raiz |
 | `https://youtube.com/watch?v=...` | arquivo solto na raiz |
+| `https://youtube.com/playlist?list=...` | subpasta com o nome da playlist |
 | `bohemian rhapsody queen` | busca por texto, arquivo solto na raiz |
 
-Tudo sai em **mp3 320k**, nomeado `{artistas} - {título}.mp3`. A última pasta usada fica
+Tudo sai em **mp3 320k**, nomeado `{artistas} - {título}.mp3`, com capa e tags.
+
+Por baixo, o link do Spotify ou a busca vão para o spotdl, que monta a lista de faixas
+e acha o vídeo de cada uma no YouTube Music. Quem baixa o áudio é o yt-dlp. Links do
+YouTube vão direto para o yt-dlp, com o nome e o artista do próprio vídeo. O porquê
+está em [docs/adr/0003](docs/adr/0003-ytdlp-oficial-baixa-o-audio.md). A última pasta usada fica
 guardada em `%APPDATA%\BaixarMusica\config.json`.
 
-Durante o download o botão vira **Cancelar**, que derruba o spotdl e o ffmpeg junto.
+Durante o download o botão vira **Cancelar**, que derruba o yt-dlp e o ffmpeg junto.
 A tecla Enter no campo de link **só inicia** download — nunca cancela.
 
 ## Verificar duplicados
 
-O spotdl já pula um arquivo que existe no mesmo caminho (`--overwrite skip`). O que
+Uma faixa cujo arquivo já existe no mesmo caminho é pulada. O que
 escapa disso é a **mesma música salva com nome diferente**, vinda de outro upload. O
 botão **Verificar duplicados** cobre esse caso comparando as tags ID3, não os nomes:
 
@@ -77,23 +84,27 @@ ignorados, justamente para não fundir versões diferentes.
 
 ## Os componentes
 
-O `.exe` tem ~11 MB e não carrega o spotdl nem o ffmpeg dentro de si. Eles ficam em
+O `.exe` tem ~12 MB e não carrega o spotdl, o yt-dlp, o ffmpeg nem o deno dentro de si.
+Eles ficam em
 `%APPDATA%\BaixarMusica\`:
 
 | Arquivo | Tamanho | Origem |
 |---|---|---|
 | `spotdl.exe` | 46 MB | binário oficial do projeto spotDL, atualizado sozinho |
+| `yt-dlp.exe` | 17 MB | binário oficial do projeto yt-dlp, atualizado sozinho |
+| `deno.exe` | 93 MB | runtime JavaScript que o yt-dlp usa no YouTube; opcional, baixado zipado (40 MB) |
 | `ffmpeg.exe` | 76 MB | `eugeneware/ffmpeg-static` b4.4, baixado comprimido (26 MB) |
-| `spotdl.exe.anterior` | 46 MB | versão anterior, para reverter se a nova nascer quebrada |
+| `*.exe.anterior` | — | versão anterior, para reverter se a nova nascer quebrada |
 
-Toda abertura o programa checa se saiu uma versão nova do spotdl e atualiza. O download
+Toda abertura o programa checa se saiu uma versão nova do spotdl e do yt-dlp e atualiza. O download
 é conferido por SHA256 e só substitui o binário bom depois de passar. Se o novo não
 executar, o anterior volta sozinho.
 
 **Sem internet o programa continua funcionando** com o que já está em disco — a checagem
 nunca bloqueia a abertura. O porquê de tudo isso está em
-[docs/adr/0001](docs/adr/0001-spotdl-como-componente-externo.md) e
-[docs/adr/0002](docs/adr/0002-baixamos-o-ffmpeg-nos-mesmos.md).
+[docs/adr/0001](docs/adr/0001-spotdl-como-componente-externo.md),
+[docs/adr/0002](docs/adr/0002-baixamos-o-ffmpeg-nos-mesmos.md) e
+[docs/adr/0003](docs/adr/0003-ytdlp-oficial-baixa-o-audio.md).
 
 ## Desenvolver
 
@@ -132,8 +143,9 @@ nenhum pontua pior nas heurísticas de antivírus. Pelo mesmo motivo o build pas
 
 - **Windows 64 bits Intel/AMD apenas.** Em outra arquitetura o programa abre e explica no
   log em vez de falhar de forma incompreensível. Não há build para Mac nem Linux.
-- **O spotdl carrega uma cópia congelada do yt-dlp.** Quando o YouTube muda, o conserto
-  depende de o spotdl lançar uma versão nova — e eles já passaram sete meses sem lançar
-  (out/2025 a abr/2026). Nessas janelas não há nada que este programa possa fazer.
+- **Quando o YouTube muda, o conserto depende do yt-dlp.** Ele costuma lançar em dias, e
+  a versão nova chega sozinha na próxima abertura. Antes da v1.2.0 o áudio vinha do
+  yt-dlp congelado dentro do spotdl, e aí o programa ficava parado até o spotdl lançar
+  versão nova — ver [docs/adr/0003](docs/adr/0003-ytdlp-oficial-baixa-o-audio.md).
 - **Dependemos de o spotDL continuar publicando o build `win32`.**
-- O primeiro uso precisa de internet razoável para os 72 MB.
+- O primeiro uso precisa de internet razoável para os ~130 MB.

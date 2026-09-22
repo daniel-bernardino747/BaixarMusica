@@ -1,4 +1,4 @@
-"""Testes do preparo: obter e manter os componentes (spotdl e ffmpeg).
+"""Testes do preparo: obter e manter os componentes (spotdl, yt-dlp, ffmpeg, deno).
 
 O que importa aqui e o que da errado longe da nossa maquina: asset errado,
 download corrompido, queda no meio da troca, versao nova quebrada.
@@ -273,3 +273,97 @@ def test_sem_spotdl_em_disco_a_falha_e_fatal(tmp_path, monkeypatch):
 
     with pytest.raises(preparo.ErroDePreparo):
         preparo._preparar_spotdl(lambda _linha: None)
+
+
+# ---------------------------------------------------- yt-dlp e deno
+
+YTDLP_RELEASE = {
+    "tag_name": "2026.08.19",
+    "assets": [
+        {"name": "yt-dlp", "size": 1, "browser_download_url": "https://exemplo/unix",
+         "digest": "sha256:aa"},
+        {"name": "yt-dlp_x86.exe", "size": 2, "browser_download_url": "https://exemplo/x86",
+         "digest": "sha256:bb"},
+        {"name": "yt-dlp.exe", "size": 3, "browser_download_url": "https://exemplo/yt-dlp.exe",
+         "digest": "sha256:cc"},
+    ],
+}
+
+
+def test_escolhe_o_ytdlp_64_bits_e_nao_o_x86():
+    asset = preparo.escolher_asset(YTDLP_RELEASE, "yt-dlp.exe", "yt-dlp")
+    assert asset.url == "https://exemplo/yt-dlp.exe"
+    assert asset.versao == "2026.08.19"
+
+
+def test_versoes_de_componentes_diferentes_nao_se_sobrescrevem(tmp_path, monkeypatch):
+    monkeypatch.setattr(preparo, "ESTADO", tmp_path / "componentes.json")
+    preparo._gravar_versao("4.5.2", "spotdl")
+    preparo._gravar_versao("2026.08.19", "yt-dlp")
+    assert preparo._versao_instalada("spotdl") == "4.5.2"
+    assert preparo._versao_instalada("yt-dlp") == "2026.08.19"
+
+
+def test_ytdlp_novo_e_baixado_e_a_versao_gravada(tmp_path, monkeypatch):
+    dados = b"MZ yt-dlp"
+    release = {"tag_name": "2026.08.19", "assets": [
+        {"name": "yt-dlp.exe", "size": len(dados), "browser_download_url": "https://exemplo/y",
+         "digest": "sha256:" + hashlib.sha256(dados).hexdigest()}]}
+    monkeypatch.setattr(preparo, "PASTA", tmp_path)
+    monkeypatch.setattr(preparo, "YTDLP", tmp_path / "yt-dlp.exe")
+    monkeypatch.setattr(preparo, "ESTADO", tmp_path / "componentes.json")
+    monkeypatch.setattr(preparo, "responde", lambda *_a, **_k: True)
+    monkeypatch.setattr(preparo, "_abrir", lambda url: FakeResposta(
+        json.dumps(release).encode() if url == preparo.API_YTDLP else dados))
+
+    preparo._preparar_ytdlp(lambda _linha: None)
+
+    assert (tmp_path / "yt-dlp.exe").read_bytes() == dados
+    assert preparo._versao_instalada("yt-dlp") == "2026.08.19"
+
+
+def test_sem_ytdlp_em_disco_a_falha_e_fatal(tmp_path, monkeypatch):
+    monkeypatch.setattr(preparo, "PASTA", tmp_path)
+    monkeypatch.setattr(preparo, "YTDLP", tmp_path / "yt-dlp.exe")
+
+    def cair(_url):
+        raise OSError("sem internet")
+    monkeypatch.setattr(preparo, "_abrir", cair)
+
+    with pytest.raises(preparo.ErroDePreparo, match="yt-dlp"):
+        preparo._preparar_ytdlp(lambda _linha: None)
+
+
+def test_falha_ao_baixar_o_deno_nao_impede_o_programa(tmp_path, monkeypatch):
+    """O deno e opcional: o yt-dlp ainda baixa a maioria dos videos sem ele."""
+    monkeypatch.setattr(preparo, "PASTA", tmp_path)
+    monkeypatch.setattr(preparo, "DENO", tmp_path / "deno.exe")
+
+    def cair(_url):
+        raise OSError("sem internet")
+    monkeypatch.setattr(preparo, "_abrir", cair)
+
+    linhas = []
+    assert preparo._preparar_deno(linhas.append) is None
+    assert any("deno" in linha for linha in linhas)
+
+
+def test_deno_chega_zipado_e_e_extraido(tmp_path, monkeypatch):
+    import zipfile
+    compactado = io.BytesIO()
+    with zipfile.ZipFile(compactado, "w") as arquivo:
+        arquivo.writestr("deno.exe", b"MZ deno")
+    dados = compactado.getvalue()
+    release = {"tag_name": "v2.9.7", "assets": [
+        {"name": "deno-x86_64-pc-windows-msvc.zip", "size": len(dados),
+         "browser_download_url": "https://exemplo/deno.zip",
+         "digest": "sha256:" + hashlib.sha256(dados).hexdigest()}]}
+    monkeypatch.setattr(preparo, "PASTA", tmp_path)
+    monkeypatch.setattr(preparo, "DENO", tmp_path / "deno.exe")
+    monkeypatch.setattr(preparo, "responde", lambda *_a, **_k: True)
+    monkeypatch.setattr(preparo, "_abrir", lambda url: FakeResposta(
+        json.dumps(release).encode() if url == preparo.API_DENO else dados))
+
+    assert preparo._preparar_deno(lambda _linha: None) == tmp_path / "deno.exe"
+    assert (tmp_path / "deno.exe").read_bytes() == b"MZ deno"
+    assert not (tmp_path / "deno.zip").exists(), "sobrou o zip de 40 MB"

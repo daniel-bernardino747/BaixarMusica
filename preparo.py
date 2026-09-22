@@ -1,7 +1,8 @@
 """Preparo: obter e manter os componentes que o programa nao carrega dentro de si.
 
-O spotdl e o ffmpeg vivem em %APPDATA%\\BaixarMusica e sao baixados na primeira
-execucao. Fica tudo fora do executavel de proposito -- ver docs/adr/0001 e 0002.
+O spotdl, o yt-dlp, o ffmpeg e o deno vivem em %APPDATA%\\BaixarMusica e sao
+baixados na primeira execucao. Fica tudo fora do executavel de proposito -- ver
+docs/adr/0001, 0002 e 0003.
 
 Duas regras sustentam o resto:
 
@@ -21,15 +22,20 @@ import shutil
 import subprocess
 import time
 import urllib.request
+import zipfile
 from collections import namedtuple
 from pathlib import Path
 
 PASTA = Path(os.environ.get("APPDATA", Path.home())) / "BaixarMusica"
 SPOTDL = PASTA / "spotdl.exe"
+YTDLP = PASTA / "yt-dlp.exe"
 FFMPEG = PASTA / "ffmpeg.exe"
+DENO = PASTA / "deno.exe"
 ESTADO = PASTA / "componentes.json"
 
 API_SPOTDL = "https://api.github.com/repos/spotDL/spotify-downloader/releases/latest"
+API_YTDLP = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
+API_DENO = "https://api.github.com/repos/denoland/deno/releases/latest"
 
 # .gz porque o binario cru tem 76 MB e o comprimido 26 MB; gzip e stdlib.
 URL_FFMPEG = "https://github.com/eugeneware/ffmpeg-static/releases/download/b4.4/win32-x64.gz"
@@ -45,6 +51,15 @@ TENTATIVAS = 3
 ESPERA_PADRAO = 3  # segundos entre tentativas
 
 Asset = namedtuple("Asset", "versao url sha256 tamanho")
+
+# Componente que se atualiza sozinho a cada abertura, direto do release oficial.
+# `sufixo` separa o asset do Windows dos das outras plataformas no mesmo release.
+Atualizavel = namedtuple("Atualizavel", "nome api sufixo")
+SPOTDL_C = Atualizavel("spotdl", API_SPOTDL, "win32.exe")
+YTDLP_C = Atualizavel("yt-dlp", API_YTDLP, "yt-dlp.exe")
+
+# O que `preparar` entrega. `deno` pode ser None: ver _preparar_deno().
+Componentes = namedtuple("Componentes", "spotdl ytdlp ffmpeg deno")
 
 
 class ErroDePreparo(Exception):
@@ -64,14 +79,14 @@ def arquitetura_suportada(maquina=None):
 
 # ------------------------------------------------------------------ asset
 
-def escolher_asset(release):
+def escolher_asset(release, sufixo="win32.exe", nome="spotdl"):
     """Qual dos arquivos do release serve nesta maquina.
 
-    O release traz binarios de tres plataformas com nomes parecidos; pegar o
+    O release traz binarios de varias plataformas com nomes parecidos; pegar o
     errado so daria erro na hora de executar.
     """
     for asset in release.get("assets", []):
-        if asset["name"].endswith("win32.exe"):
+        if asset["name"].endswith(sufixo):
             digest = (asset.get("digest") or "").removeprefix("sha256:")
             return Asset(
                 versao=release["tag_name"].lstrip("v"),
@@ -80,7 +95,7 @@ def escolher_asset(release):
                 tamanho=asset["size"],
             )
     raise ErroDePreparo(
-        "o release mais recente do spotdl nao traz o binario win32 -- "
+        f"o release mais recente do {nome} nao traz o binario {sufixo} -- "
         "provavelmente pararam de publicar para Windows."
     )
 
@@ -214,17 +229,22 @@ def baixar(url, destino, sha256=None, progresso=None, abrir=None,
 
 # ----------------------------------------------------------------- estado
 
-def _versao_instalada():
+def _estado():
     try:
-        return json.loads(ESTADO.read_text(encoding="utf-8")).get("spotdl")
+        estado = json.loads(ESTADO.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        return {}
+    return estado if isinstance(estado, dict) else {}
 
 
-def _gravar_versao(versao):
+def _versao_instalada(nome="spotdl"):
+    return _estado().get(nome)
+
+
+def _gravar_versao(versao, nome="spotdl"):
     try:
         ESTADO.parent.mkdir(parents=True, exist_ok=True)
-        ESTADO.write_text(json.dumps({"spotdl": versao}), encoding="utf-8")
+        ESTADO.write_text(json.dumps({**_estado(), nome: versao}), encoding="utf-8")
     except OSError:
         pass  # saber a versao e conveniencia; na duvida rebaixamos
 
@@ -281,56 +301,114 @@ def _preparar_ffmpeg(reportar):
     reportar("ffmpeg pronto.")
 
 
-def _atualizar_spotdl(reportar):
-    with _abrir(API_SPOTDL) as resposta:
-        asset = escolher_asset(json.load(resposta))
+def _alvo(componente):
+    # Resolvido na hora, e nao guardado no namedtuple: os testes trocam SPOTDL e
+    # YTDLP por caminhos temporarios via monkeypatch.
+    return {"spotdl": SPOTDL, "yt-dlp": YTDLP}[componente.nome]
 
-    ja_temos = SPOTDL.exists()
-    if ja_temos and _versao_instalada() == asset.versao:
+
+def _atualizar(componente, reportar):
+    nome, alvo = componente.nome, _alvo(componente)
+    with _abrir(componente.api) as resposta:
+        asset = escolher_asset(json.load(resposta), componente.sufixo, nome)
+
+    ja_temos = alvo.exists()
+    if ja_temos and _versao_instalada(nome) == asset.versao:
         return
 
     verbo = "atualizando para o" if ja_temos else "baixando o"
     megas = asset.tamanho // (1024 * 1024)
-    reportar(f"Preparando: {verbo} spotdl {asset.versao} ({megas} MB)...")
+    reportar(f"Preparando: {verbo} {nome} {asset.versao} ({megas} MB)...")
     if not asset.sha256:
         reportar("    (este release nao publica sha256; confiro executando)")
 
-    novo = PASTA / "spotdl.novo"
+    novo = PASTA / f"{nome}.novo"
     try:
-        baixar(asset.url, novo, asset.sha256, progresso=_progresso(reportar, "spotdl"))
-        instalar(novo, SPOTDL)
+        baixar(asset.url, novo, asset.sha256, progresso=_progresso(reportar, nome))
+        instalar(novo, alvo)
     finally:
         _apagar(novo)
 
-    if not responde(SPOTDL):
-        if descartar(SPOTDL):
-            reportar(f"A versao {asset.versao} nao executou aqui; voltei para a anterior.")
+    if not responde(alvo):
+        if descartar(alvo):
+            reportar(f"O {nome} {asset.versao} nao executou aqui; voltei para a anterior.")
             return
-        raise ErroDePreparo("o spotdl baixado nao executou nesta maquina")
+        raise ErroDePreparo(f"o {nome} baixado nao executou nesta maquina")
 
-    _gravar_versao(asset.versao)
-    reportar(f"spotdl {asset.versao} pronto.")
+    _gravar_versao(asset.versao, nome)
+    reportar(f"{nome} {asset.versao} pronto.")
+
+
+def _preparar_atualizavel(componente, reportar):
+    nome = componente.nome
+    ja_temos = _alvo(componente).exists()
+    try:
+        _atualizar(componente, reportar)
+    except Exception as erro:
+        # Falha ao atualizar nunca pode derrubar uma instalacao que funciona:
+        # sem internet, GitHub fora, release corrompido -- o binario velho serve.
+        if not ja_temos:
+            raise ErroDePreparo(f"preciso baixar o {nome} e nao consegui: {erro}")
+        reportar(f"Nao deu para atualizar o {nome}: {erro}")
+        reportar(f"Seguindo com a versao {_versao_instalada(nome) or 'que ja esta aqui'}.")
 
 
 def _preparar_spotdl(reportar):
     if os.environ.get("BAIXARMUSICA_SPOTDL"):
         reportar("Usando o spotdl apontado por BAIXARMUSICA_SPOTDL.")
         return
+    _preparar_atualizavel(SPOTDL_C, reportar)
 
-    ja_temos = SPOTDL.exists()
+
+def _preparar_ytdlp(reportar):
+    _preparar_atualizavel(YTDLP_C, reportar)
+
+
+def _instalar_deno(reportar):
+    with _abrir(API_DENO) as resposta:
+        asset = escolher_asset(json.load(resposta), "x86_64-pc-windows-msvc.zip", "deno")
+
+    megas = asset.tamanho // (1024 * 1024)
+    reportar(f"Preparando: baixando o deno {asset.versao} ({megas} MB, uma vez so)...")
+    compactado = PASTA / "deno.zip"
+    novo = PASTA / "deno.novo"
     try:
-        _atualizar_spotdl(reportar)
+        baixar(asset.url, compactado, asset.sha256, progresso=_progresso(reportar, "deno"))
+        with zipfile.ZipFile(compactado) as arquivo, arquivo.open("deno.exe") as origem, \
+                open(novo, "wb") as saida:
+            shutil.copyfileobj(origem, saida, BLOCO)
+        instalar(novo, DENO)
+    finally:
+        _apagar(compactado)
+        _apagar(novo)
+
+    if not responde(DENO):
+        descartar(DENO)
+        raise ErroDePreparo("o deno baixado nao executou nesta maquina")
+    reportar("deno pronto.")
+
+
+def _preparar_deno(reportar):
+    """O deno e o unico componente opcional.
+
+    O YouTube passou a exigir que o yt-dlp resolva um desafio em JavaScript, e o
+    deno e o runtime que o yt-dlp usa para isso. Hoje a maioria dos videos ainda
+    baixa sem ele, entao a falha aqui vira aviso e nao bloqueia o programa.
+    Diferente do spotdl e do yt-dlp, nao atualizamos: qualquer deno recente serve.
+    Retorna o caminho, ou None se nao houver deno utilizavel.
+    """
+    if DENO.exists():
+        return DENO
+    try:
+        _instalar_deno(reportar)
     except Exception as erro:
-        # Falha ao atualizar nunca pode derrubar uma instalacao que funciona:
-        # sem internet, GitHub fora, release corrompido -- o binario velho serve.
-        if not ja_temos:
-            raise ErroDePreparo(f"preciso baixar o spotdl e nao consegui: {erro}")
-        reportar(f"Nao deu para atualizar o spotdl: {erro}")
-        reportar(f"Seguindo com a versao {_versao_instalada() or 'que ja esta aqui'}.")
+        reportar(f"Nao consegui baixar o deno ({erro}); sigo sem ele.")
+        return None
+    return DENO
 
 
 def preparar(reportar):
-    """Deixa spotdl e ffmpeg presentes e utilizaveis. Retorna (spotdl, ffmpeg).
+    """Deixa os componentes presentes e utilizaveis. Retorna um `Componentes`.
 
     `reportar` recebe linhas de texto -- na pratica, o log da janela.
     Levanta ErroDePreparo quando nao ha como o programa funcionar.
@@ -344,4 +422,6 @@ def preparar(reportar):
     PASTA.mkdir(parents=True, exist_ok=True)
     _preparar_ffmpeg(reportar)
     _preparar_spotdl(reportar)
-    return caminho_spotdl(), FFMPEG
+    _preparar_ytdlp(reportar)
+    deno = _preparar_deno(reportar)
+    return Componentes(caminho_spotdl(), YTDLP, FFMPEG, deno)
